@@ -114,6 +114,18 @@ VOID movsdmem(ADDRINT *addr) {
     //*(double*) addr = 0;
 }
 
+static BOOL IsPLT(TRACE trace)
+{
+    RTN rtn = TRACE_Rtn(trace);
+
+    // All .plt thunks have a valid RTN
+    if (!RTN_Valid(rtn))
+        return FALSE;
+
+    if (".plt" == SEC_Name(RTN_Sec(rtn)))
+        return TRUE;
+    return FALSE;
+}
 
 string invalid = "invalid_rtn";
 
@@ -126,27 +138,43 @@ const string *Target2String(ADDRINT target)
     else
         return new string(name);
 }
-VOID docall1(ADDRINT addr, ADDRINT callsite) {
+VOID docall1(ADDRINT ip, ADDRINT addr, ADDRINT callsite, ADDRINT sp) {
 
     if (syms.find(*Target2String(addr))!=syms.end()) {
-        cout << "CALL1\t" << *Target2String(addr) << "\t" << addr << "\t" << callsite << endl;
+        cout << "CALL1\t" << "IP " << ip << "\tINTO " << *Target2String(addr)
+             << "\tFrom " << *Target2String(callsite)  
+             << "\tSP " << sp << endl;
         stackframes.push_back(make_pair(addr,callsite));
     }
 
 }
-VOID docall2(ADDRINT addr, BOOL taken, ADDRINT callsite) {
+VOID docall2(ADDRINT ip, ADDRINT addr, BOOL taken, ADDRINT callsite, ADDRINT sp) {
     if (taken) {
 
         if (syms.find(*Target2String(addr))!=syms.end()) {
-            cout << "CALL2\t" << *Target2String(addr) << "\t" << addr <<"\t" << callsite << endl;
+            cout << "CALL2\t" << "IP " << ip << "\tINTO " <<  *Target2String(addr) 
+                 << "\tFrom " << *Target2String(callsite) << "\t" << 
+                 "SP " << sp << endl;
             stackframes.push_back(make_pair(addr,callsite));
         }
     }
 }
-VOID doret(ADDRINT addr) {
-    string name = *Target2String(addr);
-    if (syms.find(name)==syms.end()) return;
-    cout << "RET\t" << name << "\t" << addr << "\t";
+VOID docall3(ADDRINT ip, ADDRINT addr, ADDRINT callsite, ADDRINT sp) {
+
+    if (syms.find(*Target2String(addr))!=syms.end()) {
+        cout << "CALL3\t" << "IP " << ip << "\tINTO " << *Target2String(addr)
+             << "\tFrom " << *Target2String(callsite) 
+             << "\tSP " << sp << endl;
+        stackframes.push_back(make_pair(addr,callsite));
+    }
+
+}
+VOID doret(ADDRINT ip,ADDRINT addr, ADDRINT retip, ADDRINT sp) {
+    string retname = *Target2String(retip);
+    if (syms.find(retname)==syms.end()) return;
+    cout << "RET\t" <<"IP " << ip << "\tFROM " << *Target2String(addr) 
+         << "\t" << "RETTO " << *Target2String(retip) 
+         << "\tSP " << sp << "\t";
 //    vector<ADDRINT>::reverse_iterator it = find(stackframes.rbegin(), stackframes.rend(), addr);
 //    if (it == stackframes.rend()) {
 //        cout << "not match!\t"  << endl;
@@ -163,24 +191,42 @@ VOID doret(ADDRINT addr) {
 VOID MyTrace(TRACE trace, VOID *V) {
     RTN rtn = TRACE_Rtn(trace);
     if ( !RTN_Valid(rtn) || SEC_Name(RTN_Sec(rtn)) != ".text") return;
-    if ( syms.find(RTN_Name(rtn)) == syms.end()) return;
+    //if ( syms.find(RTN_Name(rtn)) == syms.end()) return;
     for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
         INS tail = BBL_InsTail(bbl);
         if( INS_IsCall(tail)) {
             if ( INS_IsDirectBranchOrCall(tail)) {
                 ADDRINT target = INS_DirectBranchOrCallTargetAddress(tail);
-                INS_InsertPredicatedCall(tail, IPOINT_BEFORE, AFUNPTR(docall1), IARG_ADDRINT, target,
-                                         IARG_ADDRINT, INS_Address(tail), IARG_END);
+                INS_InsertPredicatedCall(tail, IPOINT_BEFORE, AFUNPTR(docall1), 
+                                         IARG_INST_PTR,
+                                         IARG_ADDRINT, target,
+                                         IARG_ADDRINT, INS_Address(tail), 
+                                         IARG_REG_VALUE, REG_EBP, IARG_END);
 
-            } else {
-                INS_InsertCall(tail, IPOINT_BEFORE, AFUNPTR(docall2), IARG_BRANCH_TARGET_ADDR, IARG_BRANCH_TAKEN,
-                               IARG_ADDRINT, INS_Address(tail), IARG_END);
+            } else if ( !IsPLT(trace)) {
+                INS_InsertCall(tail, IPOINT_BEFORE, AFUNPTR(docall2), 
+                               IARG_INST_PTR,
+                               IARG_BRANCH_TARGET_ADDR, IARG_BRANCH_TAKEN,
+                               IARG_ADDRINT, INS_Address(tail), 
+                               IARG_REG_VALUE, REG_EBP, IARG_END);
             }
         } else if ( INS_IsRet(tail) ) {
+            //cout << "Instrumentation instruction type:" << INS_Mnemonic(tail) << endl;    
             RTN rtn = INS_Rtn(tail);
             if (RTN_Valid(rtn)) {
-                INS_InsertCall(tail, IPOINT_BEFORE, AFUNPTR(doret), IARG_ADDRINT, RTN_Address(rtn), IARG_END);
+                INS_InsertCall(tail, IPOINT_BEFORE, AFUNPTR(doret), 
+                               IARG_INST_PTR,
+                               IARG_ADDRINT, RTN_Address(rtn), 
+                               IARG_RETURN_IP,
+                               IARG_REG_VALUE, REG_EBP, IARG_END);
             }
+        } else if (IsPLT(trace)) {
+            INS_InsertCall(tail, IPOINT_BEFORE, 
+                           AFUNPTR(docall1),
+                           IARG_INST_PTR,
+                           IARG_BRANCH_TARGET_ADDR,
+                           IARG_ADDRINT, INS_Address(tail),
+                           IARG_REG_VALUE, REG_EBP, IARG_END);
         }
     }
 }
